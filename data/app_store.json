@@ -1,0 +1,22 @@
+{
+  "users": [
+    {
+      "id": "user_ambadipudi_rupavani",
+      "name": "Ambadipudi Rupavani",
+      "email": "ambadipudirupa@gmail.com",
+      "hashed_password": "$2b$10$xog9wbBhjo.D9U6bgAUZYu.vLUiUer.2sLX2.UkglVRK2PrsXldZq",
+      "created_at": "2026-09-20T14:17:49.248Z"
+    },
+    {
+      "id": "demo-user-titan-001",
+      "name": "Dr. Alex Rivera",
+      "email": "researcher@rag.demo",
+      "hashed_password": "$2b$10$xog9wbBhjo.D9U6bgAUZYu.vLUiUer.2sLX2.UkglVRK2PrsXldZq",
+      "created_at": "2026-09-20T14:17:49.248Z"
+    }
+  ],
+  "documents": [],
+  "chunks": [],
+  "conversations": [],
+  "messages": []
+}

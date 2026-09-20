@@ -1,0 +1,6 @@
+{
+  "name": "Agentic RAG-Based Intelligent Document Chatbot",
+  "description": "Multi-format intelligent document RAG chatbot using LangChain, LangGraph, Google Gemini, ChromaDB, FastAPI, and SQLite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
