@@ -95,11 +95,27 @@ export async function runAgenticRAG(
   }
 
   // 5. Generate Grounded Answer Node
-  const answer = await GeminiService.generateGroundedAnswer(
-    question,
-    retrievedChunks.map((rc) => ({ content: rc.chunk.content, metadata: rc.chunk.metadata })),
-    conversationHistory
-  );
+  let answer: string;
+  try {
+    answer = await GeminiService.generateGroundedAnswer(
+      question,
+      retrievedChunks.map((rc) => ({ content: rc.chunk.content, metadata: rc.chunk.metadata })),
+      conversationHistory
+    );
+  } catch (err: any) {
+    if (
+      err.message &&
+      (err.message.includes('403') ||
+        err.message.includes('GEMINI_API_KEY') ||
+        err.message.includes('Permission Denied'))
+    ) {
+      throw err;
+    }
+    answer = GeminiService.synthesizeDirectGroundedResponse(
+      question,
+      retrievedChunks.map((rc) => ({ content: rc.chunk.content, metadata: rc.chunk.metadata }))
+    );
+  }
 
   // Format source citations
   const sources: SourceCitation[] = retrievedChunks.map((rc) => ({

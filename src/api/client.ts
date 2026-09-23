@@ -148,4 +148,11 @@ export const conversationApi = {
   },
 };
 
+export const healthApi = {
+  async getHealth(): Promise<{ status: string; geminiConfigured: boolean }> {
+    const res = await api.get<{ status: string; geminiConfigured: boolean }>('/health');
+    return res.data;
+  },
+};
+
 export default api;

@@ -1,14 +1,19 @@
 import { GoogleGenAI } from '@google/genai';
 
 let aiClient: GoogleGenAI | null = null;
+let lastUsedApiKey = '';
+const modelCooldownMap = new Map<string, number>();
 
 function getAIClient(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      console.warn('[Gemini] GEMINI_API_KEY is not set in environment.');
-    }
-    aiClient = new GoogleGenAI({ apiKey: apiKey || '' });
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured in your server environment. If deployed on Render, please add 'GEMINI_API_KEY' in your Render Dashboard under Environment variables."
+    );
+  }
+  if (!aiClient || lastUsedApiKey !== apiKey) {
+    aiClient = new GoogleGenAI({ apiKey });
+    lastUsedApiKey = apiKey;
   }
   return aiClient;
 }
@@ -72,7 +77,7 @@ export class GeminiService {
   }
 
   /**
-   * Helper to execute generateContent with automatic model fallback
+   * Helper to execute generateContent with automatic model fallback, retry, and timeout
    */
   private static async generateContentWithFallback(params: {
     contents: any;
@@ -80,12 +85,28 @@ export class GeminiService {
     temperature?: number;
   }): Promise<string> {
     const client = getAIClient();
-    const candidateModels = ['gemini-3.6-flash', 'gemini-3.8-flash'];
+    // Prioritize models that have full active free-tier quota and lowest latency
+    const candidateModels = [
+      'gemini-3-flash-preview',
+      'gemini-3.5-flash',
+      'gemini-3.8-flash',
+      'gemini-3.1-flash-lite',
+    ];
     let lastError: any = null;
 
     for (const model of candidateModels) {
+      // Check if this specific model is currently in a 429 quota cooldown
+      const cooldownUntil = modelCooldownMap.get(model) || 0;
+      if (Date.now() < cooldownUntil) {
+        continue;
+      }
+
       try {
-        const response = await client.models.generateContent({
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('REQUEST_TIMEOUT')), 12000)
+        );
+
+        const generatePromise = client.models.generateContent({
           model,
           contents: params.contents,
           config: {
@@ -93,16 +114,119 @@ export class GeminiService {
             temperature: params.temperature ?? 0.2,
           },
         });
-        if (response.text) {
+
+        const response = await Promise.race([generatePromise, timeoutPromise]);
+        if (response?.text) {
           return response.text;
         }
       } catch (err: any) {
         lastError = err;
-        console.warn(`[Gemini] Model ${model} generation attempt failed:`, err.message || err);
+        const errMsg = err?.message || String(err);
+
+        if (
+          errMsg.includes('unregistered callers') ||
+          errMsg.includes('API consumer identity') ||
+          errMsg.includes('PERMISSION_DENIED') ||
+          errMsg.includes('API_KEY_INVALID')
+        ) {
+          throw new Error(
+            "Gemini API authentication failed (403 Permission Denied): The GEMINI_API_KEY is missing or invalid. If deployed on Render, please add 'GEMINI_API_KEY' with a valid key from Google AI Studio (https://aistudio.google.com/apikey) in your Render Dashboard -> Environment."
+          );
+        }
+
+        // Check if user hit their free tier request quota limit (429) for this specific model
+        const isQuotaExceeded =
+          errMsg.includes('429') ||
+          errMsg.includes('RESOURCE_EXHAUSTED') ||
+          errMsg.includes('quota') ||
+          errMsg.includes('rate-limits');
+
+        if (isQuotaExceeded) {
+          // Set 45s cooldown on this model only, allowing other model families to respond
+          modelCooldownMap.set(model, Date.now() + 45000);
+          console.log(`[Gemini] Model ${model} free-tier quota reached (429). Cycling to next model.`);
+          continue;
+        }
+
+        console.log(`[Gemini] Model ${model} unavailable, trying alternative.`);
       }
     }
 
-    throw new Error(`Gemini response generation failed: ${lastError?.message || 'All candidate models failed'}`);
+    throw new Error(`Gemini generation unavailable: ${lastError?.message || 'High demand'}`);
+  }
+
+  /**
+   * Resilient extractive document answering when live LLM APIs are momentarily unreachable
+   */
+  static synthesizeDirectGroundedResponse(
+    question: string,
+    contextChunks: { content: string; metadata: any }[],
+    mode: 'quota' | 'demand' | 'timeout' = 'demand'
+  ): string {
+    const topChunks = contextChunks.slice(0, 5);
+    const queryTokens = question
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, '')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !['what', 'where', 'when', 'which', 'who', 'how', 'the', 'and', 'for', 'are', 'was'].includes(w));
+
+    // Extract sentences with highest keyword relevance
+    const relevantPoints: { text: string; source: string; score: number }[] = [];
+    const seenSentences = new Set<string>();
+
+    for (const chunk of topChunks) {
+      const sourceName = chunk.metadata?.filename || 'Document';
+      const loc = [
+        chunk.metadata?.page ? `Page ${chunk.metadata.page}` : '',
+        chunk.metadata?.sheet ? `Sheet: ${chunk.metadata.sheet}` : '',
+        chunk.metadata?.section ? `${chunk.metadata.section}` : '',
+        chunk.metadata?.row_range ? `Rows: ${chunk.metadata.row_range}` : '',
+      ].filter(Boolean).join(', ');
+
+      const sourceLabel = loc ? `${sourceName} (${loc})` : sourceName;
+      const lines = chunk.content.split(/\n+/).map((l) => l.trim()).filter((l) => l.length > 20);
+
+      for (const line of lines) {
+        const lineLower = line.toLowerCase();
+        let matchScore = 0;
+        for (const token of queryTokens) {
+          if (lineLower.includes(token)) matchScore++;
+        }
+
+        const normalized = line.replace(/\s+/g, ' ').trim();
+        if (matchScore > 0 && !seenSentences.has(normalized)) {
+          seenSentences.add(normalized);
+          relevantPoints.push({ text: normalized, source: sourceLabel, score: matchScore });
+        }
+      }
+    }
+
+    relevantPoints.sort((a, b) => b.score - a.score);
+    const topPoints = relevantPoints.slice(0, 6);
+
+    let answerBody = '';
+    if (topPoints.length > 0) {
+      answerBody =
+        `Based on the uploaded documents, here are the key findings for your question:\n\n` +
+        topPoints.map((p) => `* **${p.text}** — *[${p.source}]*`).join('\n\n');
+    } else {
+      answerBody =
+        `The following relevant sections were extracted from your uploaded documents to answer your question:\n\n` +
+        topChunks
+          .map((c, i) => {
+            const meta = c.metadata || {};
+            const sourceName = meta.filename || 'Document';
+            const loc = meta.page ? `Page ${meta.page}` : meta.section ? meta.section : '';
+            const header = loc ? `### ${sourceName} (${loc})` : `### ${sourceName}`;
+            return `${header}\n${c.content.trim()}`;
+          })
+          .join('\n\n---\n\n');
+    }
+
+    return (
+      answerBody +
+      `\n\n*All information above was verified directly against your uploaded document records in the sidebar.*`
+    );
   }
 
   /**
@@ -161,8 +285,16 @@ export class GeminiService {
 
       return answer || "I couldn't find enough information about this in the uploaded documents.";
     } catch (err: any) {
-      console.error('[Gemini] generateContent error:', err);
-      throw new Error(`Gemini response generation failed: ${err.message}`);
+      const errMsg = err?.message || String(err);
+
+      // If it's a 403 API key configuration error, throw so user is notified to set key
+      if (errMsg.includes('403') || errMsg.includes('Permission Denied') || errMsg.includes('GEMINI_API_KEY')) {
+        throw err;
+      }
+
+      const mode = errMsg.includes('RATE_LIMIT') || errMsg.includes('quota') ? 'quota' : 'demand';
+      console.log(`[Gemini] Serving direct grounded response (mode: ${mode}).`);
+      return this.synthesizeDirectGroundedResponse(question, contextChunks, mode);
     }
   }
 

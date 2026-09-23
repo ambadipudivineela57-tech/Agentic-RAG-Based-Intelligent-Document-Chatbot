@@ -71,6 +71,21 @@ export class DocumentParser {
               });
             }
 
+            // If pages didn't populate chunks but rawText exists, chunk rawText directly
+            if (extractedChunks.length === 0 && rawText.trim().length > 0) {
+              const cleanText = rawText.replace(/\s{2,}/g, ' ').trim();
+              const chunks = this.splitTextIntoChunks(cleanText, 800, 150);
+              chunks.forEach((chunkText, chunkIdx) => {
+                extractedChunks.push({
+                  content: chunkText,
+                  metadata: {
+                    page: Math.floor(chunkIdx / 2) + 1,
+                    section: `Page ${Math.floor(chunkIdx / 2) + 1}`,
+                  },
+                });
+              });
+            }
+
             if (typeof parser.destroy === 'function') {
               await parser.destroy();
             }
@@ -108,6 +123,20 @@ export class DocumentParser {
                 });
               }
 
+              if (extractedChunks.length === 0 && rawText.trim().length > 0) {
+                const cleanText = rawText.replace(/\s{2,}/g, ' ').trim();
+                const chunks = this.splitTextIntoChunks(cleanText, 800, 150);
+                chunks.forEach((chunkText, chunkIdx) => {
+                  extractedChunks.push({
+                    content: chunkText,
+                    metadata: {
+                      page: Math.floor(chunkIdx / 2) + 1,
+                      section: `Page ${Math.floor(chunkIdx / 2) + 1}`,
+                    },
+                  });
+                });
+              }
+
               if (typeof parser.destroy === 'function') {
                 await parser.destroy();
               }
@@ -127,40 +156,37 @@ export class DocumentParser {
             }
           }
         } catch (pdfErr) {
-          console.warn('[PDF Parser] Standard PDFParse failed, applying stream extractor fallback:', pdfErr);
+          console.warn('[PDF Parser] Standard PDFParse failed:', pdfErr);
         }
 
-        // Fallback if PDF text was not extracted via normal stream
+        // Clean text fallback only for real text streams, never binary dump
         if (extractedChunks.length === 0) {
           const rawStr = fileBuffer.toString('latin1');
-          const textMatches = rawStr.match(/BT[\s\S]*?ET/g) || [];
-          let cleaned = textMatches
-            .map((m) => m.replace(/[^a-zA-Z0-9\s.,!?:;'"()/_-]/g, ' '))
-            .join(' ')
-            .replace(/\s{2,}/g, ' ')
-            .trim();
+          const tjMatches = rawStr.match(/\(([^)]{3,})\)\s*Tj/g) || [];
+          const words = tjMatches
+            .map((m) => m.replace(/[()]/g, '').trim())
+            .filter((w) => /[a-zA-Z]{3,}/.test(w) && !/obj|endobj|stream|Font|Subtype|XObject|FlateDecode/i.test(w));
 
-          if (!cleaned || cleaned.length < 50) {
-            cleaned = fileBuffer
-              .toString('utf-8')
-              .replace(/[^\x20-\x7E\n\r\t]/g, ' ')
-              .replace(/\s{2,}/g, ' ')
-              .trim();
-          }
-
-          rawText = cleaned;
-          if (cleaned) {
-            const fallbackChunks = this.splitTextIntoChunks(cleaned, 800, 150);
+          if (words.length > 25) {
+            const reconstructed = words.join(' ');
+            rawText = reconstructed;
+            const fallbackChunks = this.splitTextIntoChunks(reconstructed, 800, 150);
             fallbackChunks.forEach((c, idx) => {
               extractedChunks.push({
                 content: c,
                 metadata: {
                   page: Math.floor(idx / 2) + 1,
-                  section: `Extracted Page ~${Math.floor(idx / 2) + 1}`,
+                  section: `Extracted Text ${idx + 1}`,
                 },
               });
             });
           }
+        }
+
+        if (extractedChunks.length === 0) {
+          throw new Error(
+            'Unable to extract readable text from this PDF. It appears to be an image-only scanned document or protected with custom font encoding. Please upload a PDF with selectable text, or a Word (.docx) / Excel (.xlsx) / Text file.'
+          );
         }
         break;
       }

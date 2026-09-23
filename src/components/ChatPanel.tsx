@@ -108,9 +108,33 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       clearTimeout(timer2);
       clearTimeout(timer3);
 
+      const errorDetail = err.response?.data?.detail || err.message || 'Server error';
+      const isApiKeyError =
+        errorDetail.includes('GEMINI_API_KEY') ||
+        errorDetail.includes('unregistered callers') ||
+        errorDetail.includes('API consumer identity') ||
+        errorDetail.includes('PERMISSION_DENIED') ||
+        errorDetail.includes('403');
+
+      let formattedContent = `Error generating answer: ${errorDetail}. Please verify your documents and Gemini API key.`;
+      if (isApiKeyError) {
+        formattedContent =
+          `⚠️ **Gemini API Key Required**\n\n` +
+          `The server cannot contact the Gemini API because the **GEMINI_API_KEY** environment variable is missing or invalid.\n\n` +
+          `**How to fix this on Render:**\n` +
+          `1. Open your **Render Dashboard** (https://dashboard.render.com).\n` +
+          `2. Select your **Web Service**.\n` +
+          `3. In the left navigation, click **Environment**.\n` +
+          `4. Click **Add Environment Variable**.\n` +
+          `5. Set Key: \`GEMINI_API_KEY\` and Value: your Google AI Studio API key (generate one for free at https://aistudio.google.com/apikey).\n` +
+          `6. Click **Save Changes** — Render will automatically restart your service with the key enabled.\n\n` +
+          `**If running locally:**\n` +
+          `Add \`GEMINI_API_KEY=your_key_here\` to your \`.env\` file and restart the server.`;
+      }
+
       const errorMsg: ChatMessage = {
         role: 'assistant',
-        content: `Error generating answer: ${err.response?.data?.detail || err.message || 'Server error'}. Please verify your documents and Gemini API key.`,
+        content: formattedContent,
         created_at: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, errorMsg]);
