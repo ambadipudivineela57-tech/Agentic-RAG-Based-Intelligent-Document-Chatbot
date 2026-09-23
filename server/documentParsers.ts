@@ -3,7 +3,16 @@ import * as xlsx from 'xlsx';
 import { PDFParse } from 'pdf-parse';
 import { createRequire } from 'node:module';
 
-const customRequire = createRequire(import.meta.url);
+let customRequire: any = null;
+try {
+  if (typeof require === 'function') {
+    customRequire = require;
+  } else if (typeof import.meta !== 'undefined' && import.meta?.url) {
+    customRequire = createRequire(import.meta.url);
+  }
+} catch {
+  // ignore
+}
 
 export interface ParsedChunk {
   content: string;

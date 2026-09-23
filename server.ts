@@ -15,7 +15,7 @@ import { DbUser, DbDocument, DbChunk } from './server/types';
 
 dotenv.config();
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'rag-super-secret-key-2025';
 
 const app = express();
@@ -359,7 +359,9 @@ app.delete('/api/conversations/:id', authMiddleware, (req: AuthRequest, res) => 
 // Frontend Serving (Vite dev or production static)
 // -------------------------------------------------------------
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
