@@ -226,6 +226,22 @@ app.get('/api/documents/:id', authMiddleware, (req: AuthRequest, res) => {
   res.json(doc);
 });
 
+app.get('/api/documents/:id/chunks', authMiddleware, (req: AuthRequest, res) => {
+  const doc = dbStore.getDocumentById(req.params.id);
+  if (!doc || doc.user_id !== req.user!.id) {
+    return res.status(404).json({ detail: 'Document not found.' });
+  }
+  const chunks = dbStore.getChunks(req.user!.id, [req.params.id]);
+  // Return chunks without raw vector arrays to keep payload light
+  const lightweightChunks = chunks.map((c) => ({
+    id: c.id,
+    chunk_index: c.chunk_index,
+    content: c.content,
+    metadata: c.metadata,
+  }));
+  res.json(lightweightChunks);
+});
+
 app.delete('/api/documents/:id', authMiddleware, (req: AuthRequest, res) => {
   const success = dbStore.deleteDocument(req.params.id, req.user!.id);
   if (!success) {

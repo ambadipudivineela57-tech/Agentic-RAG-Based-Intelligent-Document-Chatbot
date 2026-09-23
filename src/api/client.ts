@@ -76,6 +76,22 @@ export const documentApi = {
     const res = await api.delete<{ message: string }>(`/documents/${documentId}`);
     return res.data;
   },
+
+  async getChunks(documentId: string): Promise<Array<{
+    id: string;
+    chunk_index: number;
+    content: string;
+    metadata: {
+      page?: number;
+      sheet?: string;
+      section?: string;
+      row_range?: string;
+      filename?: string;
+    };
+  }>> {
+    const res = await api.get(`/documents/${documentId}/chunks`);
+    return res.data;
+  },
 };
 
 export const chatApi = {

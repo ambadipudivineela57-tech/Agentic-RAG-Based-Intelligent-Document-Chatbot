@@ -1,5 +1,5 @@
 import { dbStore } from './db';
-import { GeminiService, cosineSimilarity } from './geminiService';
+import { GeminiService, cosineSimilarity, generateFastVector } from './geminiService';
 import { DbChunk } from './types';
 
 export interface SourceCitation {
@@ -33,7 +33,7 @@ export async function runAgenticRAG(
   let activeQuery = question.trim();
   let rewrittenQuery: string | null = null;
   let retryCount = 0;
-  const MAX_RETRIES = 2;
+  const MAX_RETRIES = 1;
 
   // 1. Get candidate chunks from vector store for this user (filtered by documentIds if specified)
   const userChunks = dbStore.getChunks(userId, documentIds);
@@ -57,10 +57,18 @@ export async function runAgenticRAG(
   while (retryCount <= MAX_RETRIES) {
     // A. Embed query
     const queryEmbedding = await GeminiService.getEmbedding(activeQuery);
+    const fastQueryVector = generateFastVector(activeQuery, 128);
 
     // B. Calculate similarity for each chunk and rank top-5
     const scored = userChunks.map((chunk) => {
-      const sim = cosineSimilarity(queryEmbedding, chunk.embedding);
+      let sim = 0;
+      if (chunk.embedding && chunk.embedding.length === queryEmbedding.length) {
+        sim = cosineSimilarity(queryEmbedding, chunk.embedding);
+      } else if (chunk.embedding && chunk.embedding.length === 128) {
+        sim = cosineSimilarity(fastQueryVector, chunk.embedding);
+      } else {
+        sim = cosineSimilarity(queryEmbedding, chunk.embedding);
+      }
       return { chunk, similarity: sim };
     });
 
@@ -75,8 +83,8 @@ export async function runAgenticRAG(
 
     relevanceScore = evalResult.score;
 
-    // D. Conditional branch
-    if (evalResult.isRelevant || retryCount === MAX_RETRIES) {
+    // D. Conditional branch: break if relevant, good similarity match found, or retried once
+    if (evalResult.isRelevant || (retrievedChunks[0] && retrievedChunks[0].similarity >= 0.2) || retryCount >= MAX_RETRIES) {
       break;
     }
 

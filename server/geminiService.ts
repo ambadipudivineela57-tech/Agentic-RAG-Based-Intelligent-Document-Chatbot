@@ -46,7 +46,7 @@ export function generateFastVector(text: string, dimension = 128): number[] {
 
 export class GeminiService {
   /**
-   * Generates embedding vector for a text string using Gemini text-embedding-004
+   * Generates embedding vector for a text string using Gemini gemini-embedding-2-preview
    * Falls back gracefully to normalized feature vector if API key is not yet configured.
    */
   static async getEmbedding(text: string): Promise<number[]> {
@@ -54,21 +54,55 @@ export class GeminiService {
       const client = getAIClient();
       if (process.env.GEMINI_API_KEY) {
         const response = await client.models.embedContent({
-          model: 'text-embedding-004',
+          model: 'gemini-embedding-2-preview',
           contents: text.slice(0, 2048),
         });
         const resAny = response as any;
-        if (resAny.embedding?.values) {
-          return resAny.embedding.values;
-        }
-        if (resAny.embeddings?.[0]?.values) {
+        if (resAny.embeddings?.[0]?.values && Array.isArray(resAny.embeddings[0].values) && resAny.embeddings[0].values.length > 0) {
           return resAny.embeddings[0].values;
+        }
+        if (resAny.embedding?.values && Array.isArray(resAny.embedding.values) && resAny.embedding.values.length > 0) {
+          return resAny.embedding.values;
         }
       }
     } catch (err: any) {
-      console.warn('[Gemini] embedContent failed, using fallback vector:', err.message);
+      console.warn('[Gemini] embedContent failed, using fallback vector:', err.message || err);
     }
-    return generateFastVector(text);
+    return generateFastVector(text, 128);
+  }
+
+  /**
+   * Helper to execute generateContent with automatic model fallback
+   */
+  private static async generateContentWithFallback(params: {
+    contents: any;
+    systemInstruction?: string;
+    temperature?: number;
+  }): Promise<string> {
+    const client = getAIClient();
+    const candidateModels = ['gemini-3.6-flash', 'gemini-3.8-flash'];
+    let lastError: any = null;
+
+    for (const model of candidateModels) {
+      try {
+        const response = await client.models.generateContent({
+          model,
+          contents: params.contents,
+          config: {
+            systemInstruction: params.systemInstruction,
+            temperature: params.temperature ?? 0.2,
+          },
+        });
+        if (response.text) {
+          return response.text;
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[Gemini] Model ${model} generation attempt failed:`, err.message || err);
+      }
+    }
+
+    throw new Error(`Gemini response generation failed: ${lastError?.message || 'All candidate models failed'}`);
   }
 
   /**
@@ -119,17 +153,13 @@ export class GeminiService {
       `Answer factually and cite sources:`;
 
     try {
-      const client = getAIClient();
-      const response = await client.models.generateContent({
-        model: 'gemini-2.5-flash',
+      const answer = await this.generateContentWithFallback({
         contents: prompt,
-        config: {
-          systemInstruction,
-          temperature: 0.2,
-        },
+        systemInstruction,
+        temperature: 0.2,
       });
 
-      return response.text || "I couldn't find enough information about this in the uploaded documents.";
+      return answer || "I couldn't find enough information about this in the uploaded documents.";
     } catch (err: any) {
       console.error('[Gemini] generateContent error:', err);
       throw new Error(`Gemini response generation failed: ${err.message}`);
@@ -144,7 +174,6 @@ export class GeminiService {
     conversationHistory?: { role: string; content: string }[]
   ): Promise<string> {
     try {
-      const client = getAIClient();
       const historyStr = conversationHistory && conversationHistory.length > 0
         ? 'Conversation context:\n' +
           conversationHistory
@@ -161,13 +190,12 @@ export class GeminiService {
         `Preserve the exact meaning, expand acronyms, and resolve pronouns.\n` +
         `Return ONLY the rewritten query text.`;
 
-      const res = await client.models.generateContent({
-        model: 'gemini-2.5-flash',
+      const text = await this.generateContentWithFallback({
         contents: prompt,
-        config: { temperature: 0.1 },
+        temperature: 0.1,
       });
 
-      const rewritten = (res.text || '').trim().replace(/^["']|["']$/g, '');
+      const rewritten = text.trim().replace(/^["']|["']$/g, '');
       return rewritten || question;
     } catch {
       return question;
