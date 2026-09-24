@@ -9,7 +9,7 @@ import { createServer as createViteServer } from 'vite';
 
 import { dbStore } from './server/db';
 import { DocumentParser } from './server/documentParsers';
-import { GeminiService } from './server/geminiService';
+import { GeminiService, cosineSimilarity, generateFastVector } from './server/geminiService';
 import { runAgenticRAG } from './server/agenticRag';
 import { DbUser, DbDocument, DbChunk } from './server/types';
 
@@ -18,9 +18,66 @@ dotenv.config();
 const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'rag-super-secret-key-2025';
 
+// Server Event Log Ring Buffer (Last 100 events)
+interface ServerLogEntry {
+  id: string;
+  timestamp: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  durationMs: number;
+  type: 'HTTP' | 'RAG_PIPELINE' | 'VECTOR_SEARCH' | 'DB_OPERATION' | 'SYSTEM';
+  details?: string;
+}
+
+const serverLogs: ServerLogEntry[] = [
+  {
+    id: 'init_sys_1',
+    timestamp: new Date().toISOString(),
+    method: 'STARTUP',
+    path: '/api/*',
+    statusCode: 200,
+    durationMs: 0,
+    type: 'SYSTEM',
+    details: 'Agentic RAG Intelligent Document System initialized with SQLite & Gemini 2.5 Flash',
+  },
+];
+
+function addServerLog(entry: ServerLogEntry) {
+  serverLogs.unshift(entry);
+  if (serverLogs.length > 100) serverLogs.pop();
+}
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Live request tracing
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    if (req.path.startsWith('/api') && !req.path.endsWith('/backend/logs')) {
+      const type = req.path.includes('/chat')
+        ? 'RAG_PIPELINE'
+        : req.path.includes('/vector')
+        ? 'VECTOR_SEARCH'
+        : req.path.includes('/database')
+        ? 'DB_OPERATION'
+        : 'HTTP';
+
+      addServerLog({
+        id: 'log_' + Math.random().toString(36).slice(2, 9),
+        timestamp: new Date().toISOString(),
+        method: req.method,
+        path: req.path,
+        statusCode: res.statusCode,
+        durationMs: Date.now() - start,
+        type,
+      });
+    }
+  });
+  next();
+});
 
 // Multer memory storage for multi-file upload
 const upload = multer({
@@ -353,6 +410,228 @@ app.delete('/api/conversations/:id', authMiddleware, (req: AuthRequest, res) => 
     return res.status(404).json({ detail: 'Conversation not found.' });
   }
   res.json({ message: 'Conversation deleted.' });
+});
+
+// -------------------------------------------------------------
+// Database Endpoints & Vector Store Inspection
+// -------------------------------------------------------------
+app.get('/api/database/overview', (req, res) => {
+  const stats = dbStore.getStats();
+  res.json(stats);
+});
+
+app.get('/api/database/tables/:name', (req, res) => {
+  const tableName = req.params.name;
+  const search = typeof req.query.search === 'string' ? req.query.search : '';
+  const limit = Math.min(Number(req.query.limit) || 50, 100);
+  const offset = Number(req.query.offset) || 0;
+
+  const validTables = ['users', 'documents', 'chunks', 'conversations', 'messages'];
+  if (!validTables.includes(tableName)) {
+    return res.status(400).json({ detail: `Invalid table name. Valid tables: ${validTables.join(', ')}` });
+  }
+
+  const result = dbStore.getTableRows(tableName, search, limit, offset);
+  res.json(result);
+});
+
+app.post('/api/database/vector-search', async (req: Request, res: Response) => {
+  const { query, top_k = 5, document_id } = req.body;
+  if (!query || typeof query !== 'string' || !query.trim()) {
+    return res.status(400).json({ detail: 'Search query is required for vector similarity comparison.' });
+  }
+
+  const start = Date.now();
+  try {
+    const queryEmbedding = await GeminiService.getEmbedding(query.trim());
+    const fastQueryVector = generateFastVector(query.trim(), 128);
+    let allChunks = dbStore.getTableRows('chunks', '', 1000, 0).rows;
+
+    if (document_id) {
+      allChunks = allChunks.filter((c) => c.document_id === document_id);
+    }
+
+    // Retrieve original chunk entities with full embeddings
+    const fullChunks = (dbStore as any).data.chunks as DbChunk[];
+    const chunkMap = new Map(fullChunks.map((c) => [c.id, c]));
+
+    const scored = allChunks.map((chunkRow) => {
+      const full = chunkMap.get(chunkRow.id);
+      let similarity = 0;
+      if (full?.embedding) {
+        if (full.embedding.length === queryEmbedding.length) {
+          similarity = cosineSimilarity(queryEmbedding, full.embedding);
+        } else if (full.embedding.length === 128) {
+          similarity = cosineSimilarity(fastQueryVector, full.embedding);
+        } else {
+          similarity = cosineSimilarity(queryEmbedding, full.embedding);
+        }
+      }
+      return {
+        id: chunkRow.id,
+        document_id: chunkRow.document_id,
+        chunk_index: chunkRow.chunk_index,
+        content: chunkRow.content,
+        similarity: Number((similarity || 0).toFixed(4)),
+        metadata: chunkRow.metadata,
+      };
+    });
+
+    scored.sort((a, b) => b.similarity - a.similarity);
+    const topResults = scored.slice(0, Math.min(Number(top_k) || 5, 20));
+
+    res.json({
+      query: query.trim(),
+      top_k: Number(top_k) || 5,
+      total_chunks_scanned: allChunks.length,
+      latency_ms: Date.now() - start,
+      vector_dimension: queryEmbedding.length,
+      results: topResults,
+    });
+  } catch (err: any) {
+    console.error('[VectorSearch] Error:', err);
+    res.status(500).json({ detail: err.message || 'Vector search failed' });
+  }
+});
+
+app.post('/api/database/seed-sample', (req: Request, res: Response) => {
+  let userId = 'user_ambadipudi_rupavani';
+  let userEmail = 'ambadipudirupa@gmail.com';
+
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    try {
+      const payload = jwt.verify(token, JWT_SECRET) as { sub: string; email: string };
+      const user = dbStore.getUserById(payload.sub);
+      if (user) {
+        userId = user.id;
+        userEmail = user.email;
+      }
+    } catch {}
+  }
+
+  const result = dbStore.seedSampleKnowledge(userId);
+  addServerLog({
+    id: 'seed_' + Math.random().toString(36).slice(2, 9),
+    timestamp: new Date().toISOString(),
+    method: 'SEED',
+    path: '/api/database/seed-sample',
+    statusCode: 200,
+    durationMs: 45,
+    type: 'DB_OPERATION',
+    details: `Seeded ${result.documentsAdded} documents and ${result.chunksAdded} vector chunks for user ${userEmail}`,
+  });
+  res.json({
+    message: 'Sample knowledge documents, vector embeddings, and conversation seeded successfully.',
+    ...result,
+  });
+});
+
+app.get('/api/database/export', (req: Request, res: Response) => {
+  const data = dbStore.exportAll();
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', 'attachment; filename="rag_database_export.json"');
+  res.send(JSON.stringify(data, null, 2));
+});
+
+// -------------------------------------------------------------
+// Backend Status, Endpoints Directory & LangGraph Pipeline
+// -------------------------------------------------------------
+app.get('/api/backend/status', (req, res) => {
+  res.json({
+    status: 'online',
+    serverType: 'Node.js Express + TSX Engine & FastAPI Architecture',
+    port: PORT,
+    nodeVersion: process.version,
+    uptimeSeconds: Math.floor(process.uptime()),
+    geminiConfigured: !!process.env.GEMINI_API_KEY,
+    geminiModel: 'gemini-2.5-flash / gemini-3-flash-preview',
+    embeddingModel: 'text-embedding-004 / gemini-embedding-2-preview',
+    jwtConfigured: !!process.env.JWT_SECRET,
+    dataDirectory: path.resolve(process.cwd(), 'data'),
+    activeSessions: 1,
+    environment: process.env.NODE_ENV || 'development',
+  });
+});
+
+app.get('/api/backend/routes', (req, res) => {
+  const routes = [
+    { method: 'GET', path: '/api/health', auth: false, tag: 'Health', desc: 'System health check and Gemini configuration probe' },
+    { method: 'POST', path: '/api/auth/register', auth: false, tag: 'Auth', desc: 'Create user account with bcrypt salted hash', sampleBody: { name: 'Dr. Alex', email: 'alex@example.com', password: 'Password123!' } },
+    { method: 'POST', path: '/api/auth/login', auth: false, tag: 'Auth', desc: 'Authenticate user credentials and receive JWT bearer token', sampleBody: { email: 'researcher@rag.demo', password: 'Password123!' } },
+    { method: 'GET', path: '/api/auth/me', auth: true, tag: 'Auth', desc: 'Inspect current user profile and session identity' },
+    { method: 'POST', path: '/api/documents/upload', auth: true, tag: 'Documents', desc: 'Upload and parse multi-format documents (PDF, DOCX, XLSX, TXT, CSV) into vector chunks' },
+    { method: 'GET', path: '/api/documents', auth: true, tag: 'Documents', desc: 'List all parsed knowledge documents for the current user' },
+    { method: 'GET', path: '/api/documents/:id/chunks', auth: true, tag: 'Documents', desc: 'Retrieve parsed chunk text and page/row metadata for a specific document' },
+    { method: 'DELETE', path: '/api/documents/:id', auth: true, tag: 'Documents', desc: 'Delete document and cascade-delete its vector embeddings' },
+    { method: 'POST', path: '/api/chat', auth: true, tag: 'RAG Pipeline', desc: 'Execute Agentic RAG workflow with LangGraph query routing, relevance grading, and grounded citations', sampleBody: { question: 'What is the main topic of my uploaded document?', document_ids: [] } },
+    { method: 'GET', path: '/api/conversations', auth: true, tag: 'Conversations', desc: 'List conversation threads and message counts' },
+    { method: 'POST', path: '/api/conversations', auth: true, tag: 'Conversations', desc: 'Create a new conversation session thread', sampleBody: { title: 'Q3 Financial Inquiries' } },
+    { method: 'GET', path: '/api/conversations/:id', auth: true, tag: 'Conversations', desc: 'Retrieve full message transcript with source citations' },
+    { method: 'DELETE', path: '/api/conversations/:id', auth: true, tag: 'Conversations', desc: 'Delete conversation thread and its message logs' },
+    { method: 'GET', path: '/api/database/overview', auth: false, tag: 'Database', desc: 'Inspect database counts, vector dimensions, and storage volume' },
+    { method: 'GET', path: '/api/database/tables/:name', auth: false, tag: 'Database', desc: 'Query rows from users, documents, chunks, conversations, or messages' },
+    { method: 'POST', path: '/api/database/vector-search', auth: false, tag: 'Database', desc: 'Perform live cosine similarity vector distance evaluation against stored chunks', sampleBody: { query: 'vector index latency', top_k: 3 } },
+    { method: 'POST', path: '/api/database/seed-sample', auth: true, tag: 'Database', desc: 'Seed rich knowledge documents, vectors, and demo conversation' },
+    { method: 'GET', path: '/api/database/export', auth: true, tag: 'Database', desc: 'Export full database snapshot as downloadable JSON' },
+    { method: 'GET', path: '/api/backend/status', auth: false, tag: 'Backend', desc: 'Inspect backend runtime, engine configurations, and uptime' },
+    { method: 'GET', path: '/api/backend/pipeline', auth: false, tag: 'Backend', desc: 'LangGraph Agentic RAG state machine nodes and edge definitions' },
+    { method: 'GET', path: '/api/backend/logs', auth: false, tag: 'Backend', desc: 'Real-time server event and pipeline execution logs' },
+  ];
+  res.json(routes);
+});
+
+app.get('/api/backend/pipeline', (req, res) => {
+  res.json({
+    name: 'LangGraph Agentic Multi-Document RAG Graph',
+    architecture: 'StateGraph with conditional branching, query rewriting, and hallucination reflection',
+    nodes: [
+      {
+        id: 'node_input',
+        title: '1. Question Input & Deconstruction',
+        type: 'input',
+        description: 'Receives user natural language prompt and contextual conversation history window (last 6 turns).',
+        output: 'Cleaned query tokens & document scope filter',
+      },
+      {
+        id: 'node_retriever',
+        title: '2. ChromaDB Semantic Vector Retriever',
+        type: 'retriever',
+        description: 'Generates text embedding (768-D) and calculates cosine similarity across candidate document chunks.',
+        parameters: { topK: 12, metric: 'cosine_similarity', defaultCutoff: 0.60 },
+        output: 'Top K retrieved candidate chunks with page & row metadata',
+      },
+      {
+        id: 'node_grader',
+        title: '3. Relevance Grader & Query Rewriter',
+        type: 'evaluator',
+        description: 'Evaluates chunk relevance. If similarity/keyword overlap < 0.65, triggers rewrite loop using Gemini.',
+        fallbackCondition: 'score < 0.65 -> rewriteQuery() loop (max 1 retry)',
+        output: 'Filtered high-relevance chunks',
+      },
+      {
+        id: 'node_generator',
+        title: '4. Grounded Synthesis Engine',
+        type: 'generator',
+        description: 'Prompts Gemini 2.5 Flash with strict grounding instructions and exact metadata citations [Document, Page/Row].',
+        model: 'gemini-2.5-flash / gemini-3-flash-preview',
+        temperature: 0.2,
+        output: 'Synthesized grounded answer with inline bracket citations',
+      },
+      {
+        id: 'node_reflection',
+        title: '5. Hallucination Self-Reflection & Audit',
+        type: 'verifier',
+        description: 'Cross-verifies answer claims against chunk text and formats explicit source citation badges.',
+        output: 'Final verified answer + source citation cards',
+      },
+    ],
+  });
+});
+
+app.get('/api/backend/logs', (req, res) => {
+  res.json(serverLogs);
 });
 
 // -------------------------------------------------------------

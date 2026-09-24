@@ -33,7 +33,7 @@ export interface DbChunk {
     sheet?: string | null;
     section?: string | null;
     row_range?: string | null;
-    chunk_id: number;
+    chunk_id?: number | null;
     document_id: string;
     user_id: string;
   };

@@ -20,16 +20,21 @@ function getAIClient(): GoogleGenAI {
 
 export function cosineSimilarity(vecA: number[], vecB: number[]): number {
   if (!vecA || !vecB || vecA.length === 0 || vecB.length === 0) return 0;
+  const len = Math.min(vecA.length, vecB.length);
   let dot = 0;
   let normA = 0;
   let normB = 0;
-  for (let i = 0; i < vecA.length; i++) {
-    dot += vecA[i] * vecB[i];
-    normA += vecA[i] * vecA[i];
-    normB += vecB[i] * vecB[i];
+  for (let i = 0; i < len; i++) {
+    const a = Number(vecA[i]) || 0;
+    const b = Number(vecB[i]) || 0;
+    dot += a * b;
+    normA += a * a;
+    normB += b * b;
   }
   const mag = Math.sqrt(normA) * Math.sqrt(normB);
-  return mag === 0 ? 0 : dot / mag;
+  if (!mag || isNaN(mag)) return 0;
+  const sim = dot / mag;
+  return isNaN(sim) ? 0 : Math.max(-1, Math.min(1, sim));
 }
 
 export function generateFastVector(text: string, dimension = 128): number[] {
@@ -85,11 +90,10 @@ export class GeminiService {
     temperature?: number;
   }): Promise<string> {
     const client = getAIClient();
-    // Prioritize models that have full active free-tier quota and lowest latency
+    // Prioritize models from the Gemini API specification: gemini-3.8-flash, gemini-2.5-flash, gemini-3.1-flash-lite
     const candidateModels = [
-      'gemini-3-flash-preview',
-      'gemini-3.5-flash',
       'gemini-3.8-flash',
+      'gemini-2.5-flash',
       'gemini-3.1-flash-lite',
     ];
     let lastError: any = null;
@@ -286,15 +290,10 @@ export class GeminiService {
       return answer || "I couldn't find enough information about this in the uploaded documents.";
     } catch (err: any) {
       const errMsg = err?.message || String(err);
-
-      // If it's a 403 API key configuration error, throw so user is notified to set key
-      if (errMsg.includes('403') || errMsg.includes('Permission Denied') || errMsg.includes('GEMINI_API_KEY')) {
-        throw err;
-      }
-
       const mode = errMsg.includes('RATE_LIMIT') || errMsg.includes('quota') ? 'quota' : 'demand';
-      console.log(`[Gemini] Serving direct grounded response (mode: ${mode}).`);
-      return this.synthesizeDirectGroundedResponse(question, contextChunks, mode);
+      console.log(`[Gemini] Serving direct grounded response (mode: ${mode}, reason: ${errMsg.slice(0, 80)}).`);
+      const directResponse = this.synthesizeDirectGroundedResponse(question, contextChunks, mode);
+      return directResponse;
     }
   }
 

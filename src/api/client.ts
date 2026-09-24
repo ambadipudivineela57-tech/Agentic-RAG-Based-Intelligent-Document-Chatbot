@@ -155,4 +155,159 @@ export const healthApi = {
   },
 };
 
+export interface DatabaseStats {
+  usersCount: number;
+  documentsCount: number;
+  chunksCount: number;
+  conversationsCount: number;
+  messagesCount: number;
+  vectorCount: number;
+  vectorDimensions: number;
+  storageSizeBytes: number;
+  databaseType: string;
+  chromaCollection: string;
+  lastUpdated: string;
+}
+
+export interface VectorSearchResult {
+  query: string;
+  top_k: number;
+  total_chunks_scanned: number;
+  latency_ms: number;
+  vector_dimension: number;
+  results: Array<{
+    id: string;
+    document_id: string;
+    chunk_index: number;
+    content: string;
+    similarity: number;
+    metadata: any;
+  }>;
+}
+
+export const databaseApi = {
+  async getOverview(): Promise<DatabaseStats> {
+    const res = await api.get<DatabaseStats>('/database/overview');
+    return res.data;
+  },
+
+  async getTableRows(tableName: string, search = '', limit = 50, offset = 0): Promise<{ total: number; rows: any[] }> {
+    const res = await api.get<{ total: number; rows: any[] }>(`/database/tables/${tableName}`, {
+      params: { search, limit, offset },
+    });
+    return res.data;
+  },
+
+  async testVectorSearch(query: string, top_k = 5, document_id?: string): Promise<VectorSearchResult> {
+    const res = await api.post<VectorSearchResult>('/database/vector-search', {
+      query,
+      top_k,
+      document_id,
+    });
+    return res.data;
+  },
+
+  async seedSampleKnowledge(): Promise<{ message: string; documentsAdded: number; chunksAdded: number }> {
+    const res = await api.post<{ message: string; documentsAdded: number; chunksAdded: number }>('/database/seed-sample');
+    return res.data;
+  },
+
+  getExportUrl(): string {
+    return '/api/database/export';
+  },
+};
+
+export interface BackendStatus {
+  status: string;
+  serverType: string;
+  port: number;
+  nodeVersion: string;
+  uptimeSeconds: number;
+  geminiConfigured: boolean;
+  geminiModel: string;
+  embeddingModel: string;
+  jwtConfigured: boolean;
+  dataDirectory: string;
+  activeSessions: number;
+  environment: string;
+}
+
+export interface ApiRouteInfo {
+  method: string;
+  path: string;
+  auth: boolean;
+  tag: string;
+  desc: string;
+  sampleBody?: any;
+}
+
+export interface PipelineNode {
+  id: string;
+  title: string;
+  type: string;
+  description: string;
+  parameters?: any;
+  fallbackCondition?: string;
+  model?: string;
+  temperature?: number;
+  output: string;
+}
+
+export interface PipelineInfo {
+  name: string;
+  architecture: string;
+  nodes: PipelineNode[];
+}
+
+export interface ServerLogItem {
+  id: string;
+  timestamp: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  durationMs: number;
+  type: string;
+  details?: string;
+}
+
+export const backendApi = {
+  async getStatus(): Promise<BackendStatus> {
+    const res = await api.get<BackendStatus>('/backend/status');
+    return res.data;
+  },
+
+  async getRoutes(): Promise<ApiRouteInfo[]> {
+    const res = await api.get<ApiRouteInfo[]>('/backend/routes');
+    return res.data;
+  },
+
+  async getPipeline(): Promise<PipelineInfo> {
+    const res = await api.get<PipelineInfo>('/backend/pipeline');
+    return res.data;
+  },
+
+  async getLogs(): Promise<ServerLogItem[]> {
+    const res = await api.get<ServerLogItem[]>('/backend/logs');
+    return res.data;
+  },
+
+  async runCustomRequest(method: string, path: string, body?: any): Promise<{ status: number; duration: number; data: any }> {
+    const start = Date.now();
+    try {
+      const res = await api.request({
+        method: method as any,
+        url: path.replace(/^\/api/, ''),
+        data: body,
+      });
+      return { status: res.status, duration: Date.now() - start, data: res.data };
+    } catch (err: any) {
+      return {
+        status: err.response?.status || 500,
+        duration: Date.now() - start,
+        data: err.response?.data || { error: err.message },
+      };
+    }
+  },
+};
+
 export default api;

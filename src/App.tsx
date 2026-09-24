@@ -4,6 +4,9 @@ import { DocumentManager } from './components/DocumentManager';
 import { ChatPanel } from './components/ChatPanel';
 import { ConversationList } from './components/ConversationList';
 import { AuthModal } from './components/AuthModal';
+import { BackendDashboard } from './components/BackendDashboard';
+import { DatabaseDashboard } from './components/DatabaseDashboard';
+import { FrontendDashboard } from './components/FrontendDashboard';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DocumentItem, Conversation, ChatMessage } from './types';
 import { documentApi, conversationApi, healthApi } from './api/client';
@@ -11,7 +14,11 @@ import { AlertTriangle, Key, ExternalLink, X } from 'lucide-react';
 
 const MainApp: React.FC = () => {
   const { user, token, loading: authLoading } = useAuth();
-  const [activeView, setActiveView] = useState<'chat' | 'documents'>('chat');
+
+  // The 3 Distinct Architecture Pillars
+  const [activeTier, setActiveTier] = useState<'frontend' | 'backend' | 'database'>('frontend');
+  const [activeFrontendView, setActiveFrontendView] = useState<'chat' | 'documents' | 'state'>('chat');
+
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -123,7 +130,8 @@ const MainApp: React.FC = () => {
   const handleSelectConversation = (convId: string) => {
     setActiveConversationId(convId);
     loadConversationMessages(convId);
-    setActiveView('chat');
+    setActiveTier('frontend');
+    setActiveFrontendView('chat');
   };
 
   const handleNewConversation = async () => {
@@ -132,7 +140,8 @@ const MainApp: React.FC = () => {
       setConversations((prev) => [newConv, ...prev]);
       setActiveConversationId(newConv.id);
       setMessages([]);
-      setActiveView('chat');
+      setActiveTier('frontend');
+      setActiveFrontendView('chat');
     } catch (err) {
       console.error('Failed to create new conversation:', err);
     }
@@ -156,11 +165,13 @@ const MainApp: React.FC = () => {
       {/* Auth Gate */}
       {!authLoading && !user && <AuthModal />}
 
-      {/* Main Navbar */}
+      {/* Main 3-Tier Navbar */}
       <Navbar
         documentCount={documents.length}
-        activeView={activeView}
-        setActiveView={setActiveView}
+        activeTier={activeTier}
+        setActiveTier={setActiveTier}
+        activeFrontendView={activeFrontendView}
+        setActiveFrontendView={setActiveFrontendView}
       />
 
       {/* Gemini API Key Warning Banner if missing on backend */}
@@ -276,46 +287,75 @@ const MainApp: React.FC = () => {
         </div>
       )}
 
-      {/* Main Content Area */}
+      {/* Main Content Area: Decoupled into Frontend, Backend, Database */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">
-        {activeView === 'documents' ? (
-          <DocumentManager
-            documents={documents}
-            selectedDocIds={selectedDocIds}
-            onToggleDocSelection={handleToggleDocSelection}
-            onSelectAllDocs={handleSelectAllDocs}
-            onClearDocSelection={handleClearDocSelection}
-            onRefreshDocs={fetchDocuments}
-            loading={docsLoading}
-          />
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
-            {/* Left Sidebar: Conversation Threads */}
-            <div className="hidden lg:block lg:col-span-1">
-              <ConversationList
-                conversations={conversations}
-                activeConversationId={activeConversationId}
-                onSelectConversation={handleSelectConversation}
-                onNewConversation={handleNewConversation}
-                onDeleteConversation={handleDeleteConversation}
-              />
-            </div>
-
-            {/* Main Chat Panel */}
-            <div className="lg:col-span-3">
-              <ChatPanel
+        {/* ============================================================ */}
+        {/* TIER 1: FRONTEND                                             */}
+        {/* ============================================================ */}
+        {activeTier === 'frontend' && (
+          <>
+            {activeFrontendView === 'documents' && (
+              <DocumentManager
                 documents={documents}
                 selectedDocIds={selectedDocIds}
-                onClearDocFilter={handleClearDocSelection}
-                onNavigateToDocs={() => setActiveView('documents')}
-                activeConversationId={activeConversationId}
-                onNewConversation={handleNewConversation}
-                messages={messages}
-                setMessages={setMessages}
+                onToggleDocSelection={handleToggleDocSelection}
+                onSelectAllDocs={handleSelectAllDocs}
+                onClearDocSelection={handleClearDocSelection}
+                onRefreshDocs={fetchDocuments}
+                loading={docsLoading}
               />
-            </div>
-          </div>
+            )}
+
+            {activeFrontendView === 'state' && (
+              <FrontendDashboard
+                documents={documents}
+                selectedDocIds={selectedDocIds}
+                activeConversationId={activeConversationId}
+                onNavigateToChat={() => setActiveFrontendView('chat')}
+                onNavigateToDocs={() => setActiveFrontendView('documents')}
+              />
+            )}
+
+            {activeFrontendView === 'chat' && (
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+                {/* Left Sidebar: Conversation Threads */}
+                <div className="hidden lg:block lg:col-span-1">
+                  <ConversationList
+                    conversations={conversations}
+                    activeConversationId={activeConversationId}
+                    onSelectConversation={handleSelectConversation}
+                    onNewConversation={handleNewConversation}
+                    onDeleteConversation={handleDeleteConversation}
+                  />
+                </div>
+
+                {/* Main Chat Panel */}
+                <div className="lg:col-span-3">
+                  <ChatPanel
+                    documents={documents}
+                    selectedDocIds={selectedDocIds}
+                    onClearDocFilter={handleClearDocSelection}
+                    onNavigateToDocs={() => setActiveFrontendView('documents')}
+                    activeConversationId={activeConversationId}
+                    onNewConversation={handleNewConversation}
+                    messages={messages}
+                    setMessages={setMessages}
+                  />
+                </div>
+              </div>
+            )}
+          </>
         )}
+
+        {/* ============================================================ */}
+        {/* TIER 2: BACKEND                                              */}
+        {/* ============================================================ */}
+        {activeTier === 'backend' && <BackendDashboard />}
+
+        {/* ============================================================ */}
+        {/* TIER 3: DATABASE                                             */}
+        {/* ============================================================ */}
+        {activeTier === 'database' && <DatabaseDashboard />}
       </main>
     </div>
   );

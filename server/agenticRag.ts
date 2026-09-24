@@ -102,15 +102,7 @@ export async function runAgenticRAG(
       retrievedChunks.map((rc) => ({ content: rc.chunk.content, metadata: rc.chunk.metadata })),
       conversationHistory
     );
-  } catch (err: any) {
-    if (
-      err.message &&
-      (err.message.includes('403') ||
-        err.message.includes('GEMINI_API_KEY') ||
-        err.message.includes('Permission Denied'))
-    ) {
-      throw err;
-    }
+  } catch (_err: any) {
     answer = GeminiService.synthesizeDirectGroundedResponse(
       question,
       retrievedChunks.map((rc) => ({ content: rc.chunk.content, metadata: rc.chunk.metadata }))
